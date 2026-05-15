@@ -22,39 +22,46 @@ ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 STATE_FILE = "state.json"
 
-STEP1 = """Subject: Quick question about {name}
+# Subject lines (kept as variables so follow-ups thread correctly)
+SUBJECT_STEP1 = "missed any reservations this week?"
+SUBJECT_FOLLOWUP = "Re: missed any reservations this week?"
 
-Hi,
+STEP1 = """Hi,
 
-I was looking up restaurants in {city} and came across {name}.
+Found {name} while looking up {city} restaurants and had a quick question.
 
-Quick question — do you ever lose reservations because calls go unanswered during rush hour or after close?
+How often do calls go to voicemail during your dinner rush — or after you close? Every missed call is usually a missed reservation.
 
-Asking because I built an AI receptionist that handles calls 24/7 for restaurants. Wanted to see if it's something that'd be useful for you.
+I built an AI receptionist that answers your phone 24/7, books reservations, and texts you a summary after each call. Sounds like a real person.
 
-— Jesse"""
+You can hear it right now — call (563) 287-1146. Takes 30 seconds.
 
-STEP2 = """Subject: Re: Quick question about {name}
-
-Hey again,
-
-Didn't hear back so wanted to follow up quick.
-
-We built an AI that answers your restaurant's calls 24/7 — books reservations, handles menu questions, works after hours. Sounds like a real person.
-
-You can hear it live right now: call (563) 287-1146
-
-No commitment, just see if it's what you need.
+If it sounds useful, full setup is at calldone.org.
 
 — Jesse"""
 
-STEP3 = """Subject: Re: Quick question about {name}
+STEP2 = """Hey,
 
-Last one, promise.
+Wanted to bump this in case it got buried.
 
-If missing calls is costing you reservations, calldone.org has everything you need. Takes 48 hours to go live.
+If you haven't yet, call (563) 287-1146 and hear what your customers would hear. It's a real demo of the AI — make a reservation, ask about hours, try to trip it up.
+
+Most restaurant owners I've shown this to thought it was a person for the first 20 seconds.
+
+calldone.org if you want to set yours up. Live in 48 hours.
 
 — Jesse"""
+
+STEP3 = """Last note from me.
+
+Math on missing calls: average reservation is around $180. If you miss 3 a week, that's $28k a year walking out the door.
+
+CallDone fixes it for $1,000 setup + $500/month. Less than what one missed table per week costs you.
+
+Call (563) 287-1146 to hear it. Sign up at calldone.org.
+
+— Jesse"""
+
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -62,9 +69,11 @@ def load_state():
             return json.load(f)
     return {}
 
+
 def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
+
 
 def send_email(to, subject, body):
     try:
@@ -82,21 +91,29 @@ def send_email(to, subject, body):
         print(f"Send error: {e}")
         return False
 
+
 def get_ai_reply(thread_history, restaurant_name):
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     prompt = f"""You are Jesse, a 21-year-old who built an AI phone receptionist called CallDone for restaurants.
+
 A restaurant owner replied to your cold email. Your goal is to move them toward visiting calldone.org or calling the demo at (563) 287-1146.
+
 Be conversational, short, and direct. No more than 3 sentences. Don't be salesy.
+
 Restaurant: {restaurant_name}
+
 Thread:
 {thread_history}
+
 Write only the reply body, no subject line."""
+
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
     return response.content[0].text
+
 
 def check_replies(state):
     try:
@@ -112,22 +129,28 @@ def check_replies(state):
             if msg.is_multipart():
                 for part in msg.walk():
                     if part.get_content_type() == "text/plain":
-                        body = part.get_payload(decode=True).decode()
+                        try:
+                            body = part.get_payload(decode=True).decode(errors="ignore")
+                        except Exception:
+                            body = ""
                         break
             else:
-                body = msg.get_payload(decode=True).decode()
-
+                try:
+                    body = msg.get_payload(decode=True).decode(errors="ignore")
+                except Exception:
+                    body = ""
             if sender in state:
                 print(f"Reply from {sender}, generating AI response...")
                 thread = state[sender].get("thread", "") + f"\nThem: {body}"
                 ai_reply = get_ai_reply(thread, state[sender].get("name", ""))
-                send_email(sender, "Re: Quick question about " + state[sender].get("name", ""), ai_reply)
+                send_email(sender, SUBJECT_FOLLOWUP, ai_reply)
                 state[sender]["thread"] = thread + f"\nYou: {ai_reply}"
                 state[sender]["step"] = "replied"
                 save_state(state)
         mail.logout()
     except Exception as e:
         print(f"IMAP error: {e}")
+
 
 def run():
     state = load_state()
@@ -147,10 +170,18 @@ def run():
         name = lead["Name"]
         city = lead["City"]
 
+        # New lead → start at step 0
         if email_addr not in state:
-            state[email_addr] = {"step": 0, "name": name, "city": city, "thread": "", "last_sent": ""}
+            state[email_addr] = {
+                "step": 0,
+                "name": name,
+                "city": city,
+                "thread": "",
+                "last_sent": ""
+            }
 
         entry = state[email_addr]
+
         if entry["step"] == "replied":
             continue
 
@@ -158,9 +189,9 @@ def run():
         step = entry["step"]
 
         if step == 0:
+            # Brand new lead - send Step 1
             body = STEP1.format(name=name, city=city)
-            subject = f"Quick question about {name}"
-            if send_email(email_addr, subject, body):
+            if send_email(email_addr, SUBJECT_STEP1, body):
                 entry["step"] = 1
                 entry["last_sent"] = now.isoformat()
                 entry["thread"] = f"You: {body}"
@@ -169,8 +200,9 @@ def run():
                 time.sleep(30)
 
         elif step == 1 and last_sent and now - last_sent > timedelta(days=2):
+            # Already got Step 1 (old or new copy) - send Step 2
             body = STEP2.format(name=name, city=city)
-            if send_email(email_addr, "Re: Quick question about " + name, body):
+            if send_email(email_addr, SUBJECT_FOLLOWUP, body):
                 entry["step"] = 2
                 entry["last_sent"] = now.isoformat()
                 entry["thread"] += f"\nYou: {body}"
@@ -179,8 +211,9 @@ def run():
                 time.sleep(30)
 
         elif step == 2 and last_sent and now - last_sent > timedelta(days=2):
+            # Already got Step 2 - send Step 3
             body = STEP3.format(name=name, city=city)
-            if send_email(email_addr, "Re: Quick question about " + name, body):
+            if send_email(email_addr, SUBJECT_FOLLOWUP, body):
                 entry["step"] = 3
                 entry["last_sent"] = now.isoformat()
                 entry["thread"] += f"\nYou: {body}"
@@ -190,7 +223,9 @@ def run():
 
     # Check for replies
     check_replies(state)
+
     print("Cycle complete.")
+
 
 if __name__ == "__main__":
     while True:
