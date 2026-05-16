@@ -3,9 +3,18 @@ import csv
 import time
 import os
 from dotenv import load_dotenv
-
 load_dotenv()
 API_KEY = os.getenv("GOOGLE_API_KEY")
+
+# Contractor verticals to scrape per city
+QUERIES = [
+    "plumber",
+    "HVAC contractor",
+    "electrician",
+    "roofing contractor",
+    "general contractor",
+    "landscaping company",
+]
 
 CITIES = [
     # California
@@ -129,18 +138,20 @@ CITIES = [
     "Bridgeport, CT", "New Haven, CT", "Hartford, CT", "Stamford, CT",
 ]
 
-def search_restaurants(city):
+
+def search_places(query, city):
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": API_KEY,
         "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.id"
     }
-    body = {"textQuery": f"restaurant in {city}", "maxResultCount": 20}
+    body = {"textQuery": f"{query} in {city}", "maxResultCount": 20}
     response = requests.post(url, headers=headers, json=body)
     return response.json()
 
-def save_to_csv(places, city):
+
+def save_to_csv(places, city, vertical):
     with open("leads.csv", "a", newline="") as f:
         writer = csv.writer(f)
         for p in places:
@@ -148,18 +159,21 @@ def save_to_csv(places, city):
             address = p.get("formattedAddress", "")
             phone = p.get("nationalPhoneNumber", "")
             website = p.get("websiteUri", "")
-            writer.writerow([name, address, phone, website, city])
-    print(f"Saved {len(places)} from {city}")
+            writer.writerow([name, address, phone, website, city, vertical])
+    print(f"Saved {len(places)} {vertical}s from {city}")
 
+
+# Write header (extra column for vertical so we know what each lead is)
 with open("leads.csv", "w", newline="") as f:
-    csv.writer(f).writerow(["Name", "Address", "Phone", "Website", "City"])
+    csv.writer(f).writerow(["Name", "Address", "Phone", "Website", "City", "Vertical"])
 
 for city in CITIES:
-    print(f"Scraping {city}...")
-    data = search_restaurants(city)
-    places = data.get("places", [])
-    if places:
-        save_to_csv(places, city)
-    time.sleep(1)
+    for query in QUERIES:
+        print(f"Scraping {query} in {city}...")
+        data = search_places(query, city)
+        places = data.get("places", [])
+        if places:
+            save_to_csv(places, city, query)
+        time.sleep(1)
 
 print("Done. Check leads.csv")
