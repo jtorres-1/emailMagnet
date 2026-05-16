@@ -10,71 +10,43 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import anthropic
-
 load_dotenv()
-
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 587
 IMAP_HOST = "imap.gmail.com"
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
-
 STATE_FILE = "state.json"
-
 # Subject lines (kept as variables so follow-ups thread correctly)
-SUBJECT_STEP1 = "missed any reservations this week?"
-SUBJECT_FOLLOWUP = "Re: missed any reservations this week?"
-
+SUBJECT_STEP1 = "missing calls while you're on a job?"
+SUBJECT_FOLLOWUP = "Re: missing calls while you're on a job?"
 STEP1 = """Hi,
-
-Found {name} while looking up {city} restaurants and had a quick question.
-
-How often do calls go to voicemail during your dinner rush — or after you close? Every missed call is usually a missed reservation.
-
-I built an AI receptionist that answers your phone 24/7, books reservations, and texts you a summary after each call. Sounds like a real person.
-
-You can hear it right now — call (563) 287-1146. Takes 30 seconds.
-
+Found {name} while looking up {city} contractors and had a quick question.
+How many calls go to voicemail while you're under a sink, up on a roof, or in someone's attic? Every missed call is usually a missed job.
+I built an AI receptionist that picks up your phone 24/7, books service calls, qualifies leads, and texts you a summary the second you're free. Sounds like a real person.
+You can hear it right now, call (563) 287-1146. Takes 30 seconds.
 If it sounds useful, full setup is at calldone.org.
-
-— Jesse"""
-
+Jesse"""
 STEP2 = """Hey,
-
-Wanted to bump this in case it got buried.
-
-If you haven't yet, call (563) 287-1146 and hear what your customers would hear. It's a real demo of the AI — make a reservation, ask about hours, try to trip it up.
-
-Most restaurant owners I've shown this to thought it was a person for the first 20 seconds.
-
-calldone.org if you want to set yours up. Live in 48 hours.
-
-— Jesse"""
-
+Wanted to bump this in case it got buried under job tickets.
+If you haven't yet, call (563) 287-1146 and hear what your callers would hear. Ask it to book a service appointment, ask about pricing, try to trip it up.
+Most contractors I've shown this to thought it was a person for the first 20 seconds.
+calldone.org if you want yours set up. Live in 48 hours.
+Jesse"""
 STEP3 = """Last note from me.
-
-Math on missing calls: average reservation is around $180. If you miss 3 a week, that's $28k a year walking out the door.
-
-CallDone fixes it for $1,000 setup + $500/month. Less than what one missed table per week costs you.
-
+Math on missing calls: average service call is around $400. Average new install is $3,500+. If you miss 3 calls a week, that's $60k+ a year walking out the door.
+CallDone fixes it for $1,000 setup + $500/month. Less than what one missed job a month costs you.
 Call (563) 287-1146 to hear it. Sign up at calldone.org.
-
-— Jesse"""
-
-
+Jesse"""
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
             return json.load(f)
     return {}
-
-
 def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
-
-
 def send_email(to, subject, body):
     try:
         msg = MIMEMultipart()
@@ -90,31 +62,23 @@ def send_email(to, subject, body):
     except Exception as e:
         print(f"Send error: {e}")
         return False
-
-
-def get_ai_reply(thread_history, restaurant_name):
+def get_ai_reply(thread_history, business_name, vertical=""):
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-    prompt = f"""You are Jesse, a 21-year-old who built an AI phone receptionist called CallDone for restaurants.
-
-A restaurant owner replied to your cold email. Your goal is to move them toward visiting calldone.org or calling the demo at (563) 287-1146.
-
-Be conversational, short, and direct. No more than 3 sentences. Don't be salesy.
-
-Restaurant: {restaurant_name}
-
+    vertical_line = f"They are a {vertical}." if vertical else ""
+    prompt = f"""You are Jesse, a 21-year-old who built an AI phone receptionist called CallDone for service businesses (plumbers, HVAC, electricians, roofers, contractors).
+A business owner replied to your cold email. Your goal is to move them toward visiting calldone.org or calling the demo at (563) 287-1146.
+Be conversational, short, direct. No more than 3 sentences. Don't be salesy. Talk like a contractor would talk, not corporate. They are busy and on a job site, get to the point.
+Business: {business_name}
+{vertical_line}
 Thread:
 {thread_history}
-
 Write only the reply body, no subject line."""
-
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
     return response.content[0].text
-
-
 def check_replies(state):
     try:
         mail = imaplib.IMAP4_SSL(IMAP_HOST)
@@ -142,7 +106,8 @@ def check_replies(state):
             if sender in state:
                 print(f"Reply from {sender}, generating AI response...")
                 thread = state[sender].get("thread", "") + f"\nThem: {body}"
-                ai_reply = get_ai_reply(thread, state[sender].get("name", ""))
+                vertical = state[sender].get("vertical", "")
+                ai_reply = get_ai_reply(thread, state[sender].get("name", ""), vertical)
                 send_email(sender, SUBJECT_FOLLOWUP, ai_reply)
                 state[sender]["thread"] = thread + f"\nYou: {ai_reply}"
                 state[sender]["step"] = "replied"
@@ -150,44 +115,36 @@ def check_replies(state):
         mail.logout()
     except Exception as e:
         print(f"IMAP error: {e}")
-
-
 def run():
     state = load_state()
     now = datetime.now()
-
     # Load leads
     leads = []
     with open("leads_with_email.csv") as f:
         for row in csv.DictReader(f):
             if row.get("Email") and "@" in row["Email"]:
                 leads.append(row)
-
     print(f"Loaded {len(leads)} leads with emails")
-
     for lead in leads:
         email_addr = lead["Email"].lower()
         name = lead["Name"]
         city = lead["City"]
-
+        vertical = lead.get("Vertical", "")
         # New lead → start at step 0
         if email_addr not in state:
             state[email_addr] = {
                 "step": 0,
                 "name": name,
                 "city": city,
+                "vertical": vertical,
                 "thread": "",
                 "last_sent": ""
             }
-
         entry = state[email_addr]
-
         if entry["step"] == "replied":
             continue
-
         last_sent = datetime.fromisoformat(entry["last_sent"]) if entry["last_sent"] else None
         step = entry["step"]
-
         if step == 0:
             # Brand new lead - send Step 1
             body = STEP1.format(name=name, city=city)
@@ -198,7 +155,6 @@ def run():
                 print(f"Step 1 sent → {email_addr}")
                 save_state(state)
                 time.sleep(30)
-
         elif step == 1 and last_sent and now - last_sent > timedelta(days=2):
             # Already got Step 1 (old or new copy) - send Step 2
             body = STEP2.format(name=name, city=city)
@@ -209,7 +165,6 @@ def run():
                 print(f"Step 2 sent → {email_addr}")
                 save_state(state)
                 time.sleep(30)
-
         elif step == 2 and last_sent and now - last_sent > timedelta(days=2):
             # Already got Step 2 - send Step 3
             body = STEP3.format(name=name, city=city)
@@ -220,13 +175,9 @@ def run():
                 print(f"Step 3 sent → {email_addr}")
                 save_state(state)
                 time.sleep(30)
-
     # Check for replies
     check_replies(state)
-
     print("Cycle complete.")
-
-
 if __name__ == "__main__":
     while True:
         run()
