@@ -11,8 +11,8 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import anthropic
 load_dotenv()
-SMTP_HOST = "smtp-relay.gmail.com"
-SMTP_PORT = 465
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 587
 IMAP_HOST = "imap.gmail.com"
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
