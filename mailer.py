@@ -10,43 +10,60 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import anthropic
+
 load_dotenv()
+
 SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
+SMTP_PORT = 465
 IMAP_HOST = "imap.gmail.com"
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
 STATE_FILE = "state.json"
-# Subject lines (kept as variables so follow-ups thread correctly)
-SUBJECT_STEP1 = "missing calls while you're on a job?"
-SUBJECT_FOLLOWUP = "Re: missing calls while you're on a job?"
-STEP1 = """Hi,
-Found {name} while looking up {city} contractors and had a quick question.
-How many calls go to voicemail while you're under a sink, up on a roof, or in someone's attic? Every missed call is usually a missed job.
-I built an AI receptionist that picks up your phone 24/7, books service calls, qualifies leads, and texts you a summary the second you're free. Sounds like a real person.
-You can hear it right now, call (563) 287-1146. Takes 30 seconds.
-If it sounds useful, full setup is at calldone.org.
+
+SUBJECT_STEP1 = "tool that pulls 100 local business leads in 60 seconds"
+SUBJECT_FOLLOWUP = "Re: tool that pulls 100 local business leads in 60 seconds"
+
+STEP1 = """Hi {name},
+
+Found your business while looking up agencies and marketing companies in {city}.
+
+Built a tool called MapZap that pulls 100 local business leads as a CSV in about 60 seconds. You type a business type and city, it returns names, phone numbers, addresses, and websites.
+
+$49 one time, no subscription. Thought it might be useful for client prospecting or outreach lists.
+
+mapzap.org if you want to check it out.
+
 Jesse"""
-STEP2 = """Hey,
-Wanted to bump this in case it got buried under job tickets.
-If you haven't yet, call (563) 287-1146 and hear what your callers would hear. Ask it to book a service appointment, ask about pricing, try to trip it up.
-Most contractors I've shown this to thought it was a person for the first 20 seconds.
-calldone.org if you want yours set up. Live in 48 hours.
+
+STEP2 = """Hey {name},
+
+Just following up in case this got buried.
+
+MapZap pulls 100 local business leads as a CSV in 60 seconds — names, phones, addresses. $49 one time, no monthly fee.
+
+If you ever need a quick list for a client campaign or outreach push, mapzap.org
+
 Jesse"""
-STEP3 = """Last note from me.
-Math on missing calls: average service call is around $400. Average new install is $3,500+. If you miss 3 calls a week, that's $60k+ a year walking out the door.
-CallDone fixes it for $1,000 setup + $500/month. Less than what one missed job a month costs you.
-Call (563) 287-1146 to hear it. Sign up at calldone.org.
+
+STEP3 = """Last one from me {name}.
+
+If you do any kind of local outreach or client prospecting, MapZap saves hours of manual list building. 100 leads, any niche, any city, 60 seconds, $49 flat.
+
+mapzap.org
+
 Jesse"""
+
 def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE) as f:
             return json.load(f)
     return {}
+
 def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
+
 def send_email(to, subject, body):
     try:
         msg = MIMEMultipart()
@@ -54,31 +71,38 @@ def send_email(to, subject, body):
         msg["To"] = to
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
             server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
             server.send_message(msg)
         return True
     except Exception as e:
         print(f"Send error: {e}")
         return False
+
 def get_ai_reply(thread_history, business_name, vertical=""):
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     vertical_line = f"They are a {vertical}." if vertical else ""
-    prompt = f"""You are Jesse, a 21-year-old who built an AI phone receptionist called CallDone for service businesses (plumbers, HVAC, electricians, roofers, contractors).
-A business owner replied to your cold email. Your goal is to move them toward visiting calldone.org or calling the demo at (563) 287-1146.
-Be conversational, short, direct. No more than 3 sentences. Don't be salesy. Talk like a contractor would talk, not corporate. They are busy and on a job site, get to the point.
+    prompt = f"""You are Jesse, a 21-year-old developer who built MapZap — a tool that pulls 100 local business leads as a CSV in 60 seconds. $49 one time at mapzap.org.
+
+A business owner or marketer replied to your cold email. Your goal is to answer their question and move them toward buying at mapzap.org.
+
+Be short, direct, conversational. Max 3 sentences. No corporate language. If they ask about price it's $49 one time. If they ask how it works: type a business type and city, get 100 leads with names, phones, addresses as a CSV instantly.
+
 Business: {business_name}
 {vertical_line}
+
 Thread:
 {thread_history}
+
 Write only the reply body, no subject line."""
+
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=300,
         messages=[{"role": "user", "content": prompt}]
     )
     return response.content[0].text
+
 def check_replies(state):
     try:
         mail = imaplib.IMAP4_SSL(IMAP_HOST)
@@ -115,22 +139,25 @@ def check_replies(state):
         mail.logout()
     except Exception as e:
         print(f"IMAP error: {e}")
+
 def run():
     state = load_state()
     now = datetime.now()
-    # Load leads
+
     leads = []
     with open("leads_with_email.csv") as f:
         for row in csv.DictReader(f):
             if row.get("Email") and "@" in row["Email"]:
                 leads.append(row)
+
     print(f"Loaded {len(leads)} leads with emails")
+
     for lead in leads:
         email_addr = lead["Email"].lower()
-        name = lead["Name"]
-        city = lead["City"]
+        name = lead.get("Name", "there")
+        city = lead.get("City", "your city")
         vertical = lead.get("Vertical", "")
-        # New lead → start at step 0
+
         if email_addr not in state:
             state[email_addr] = {
                 "step": 0,
@@ -140,13 +167,15 @@ def run():
                 "thread": "",
                 "last_sent": ""
             }
+
         entry = state[email_addr]
         if entry["step"] == "replied":
             continue
+
         last_sent = datetime.fromisoformat(entry["last_sent"]) if entry["last_sent"] else None
         step = entry["step"]
+
         if step == 0:
-            # Brand new lead - send Step 1
             body = STEP1.format(name=name, city=city)
             if send_email(email_addr, SUBJECT_STEP1, body):
                 entry["step"] = 1
@@ -154,9 +183,9 @@ def run():
                 entry["thread"] = f"You: {body}"
                 print(f"Step 1 sent → {email_addr}")
                 save_state(state)
-                time.sleep(30)
+                time.sleep(90)  # 90 second delay -- avoids Gmail throttling
+
         elif step == 1 and last_sent and now - last_sent > timedelta(days=2):
-            # Already got Step 1 (old or new copy) - send Step 2
             body = STEP2.format(name=name, city=city)
             if send_email(email_addr, SUBJECT_FOLLOWUP, body):
                 entry["step"] = 2
@@ -164,9 +193,9 @@ def run():
                 entry["thread"] += f"\nYou: {body}"
                 print(f"Step 2 sent → {email_addr}")
                 save_state(state)
-                time.sleep(30)
+                time.sleep(90)
+
         elif step == 2 and last_sent and now - last_sent > timedelta(days=2):
-            # Already got Step 2 - send Step 3
             body = STEP3.format(name=name, city=city)
             if send_email(email_addr, SUBJECT_FOLLOWUP, body):
                 entry["step"] = 3
@@ -174,10 +203,11 @@ def run():
                 entry["thread"] += f"\nYou: {body}"
                 print(f"Step 3 sent → {email_addr}")
                 save_state(state)
-                time.sleep(30)
-    # Check for replies
+                time.sleep(90)
+
     check_replies(state)
     print("Cycle complete.")
+
 if __name__ == "__main__":
     while True:
         run()
