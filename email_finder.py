@@ -173,3 +173,12 @@ def run():
             else:
                 skipped += 1
                 print(f"[{i+1}/{len(rows)}] {row['Name']} → no email")
+
+            finder_state[key] = True
+            save_finder_state(finder_state)
+            time.sleep(0.3)
+
+    print(f"\nDone. Kept: {kept} Skipped: {skipped}")
+
+if __name__ == "__main__":
+    run()
