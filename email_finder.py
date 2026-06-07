@@ -2,59 +2,56 @@ import csv
 import requests
 import re
 import time
-import socket
+import os
+import json
 import dns.resolver
 from urllib.parse import urljoin, urlparse
-# =========================
-# FILTERS
-# =========================
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(BASE_DIR)
+
+LEADS_FILE = os.path.join(BASE_DIR, "leads.csv")
+OUTPUT_FILE = os.path.join(BASE_DIR, "leads_with_email.csv")
+STATE_FILE = os.path.join(BASE_DIR, "finder_state.json")
+
 BLOCKED_DOMAINS = {
-    # placeholders
-    "your-domain.com", "domain.com", "address.com", "example.com",
-    "example.org", "email.com", "yourdomain.com", "test.com",
-    "yourcompany.com", "company.com", "site.com", "mysite.com",
-    "website.com",
-    # platform / vendor noise
+    "your-domain.com", "domain.com", "example.com", "example.org",
+    "email.com", "yourdomain.com", "test.com", "website.com",
     "sentry.io", "wixpress.com", "squarespace.com", "godaddy.com",
-    "wordpress.com", "shopify.com",
-    # corporate parents that aren't real business inboxes
-    "hilton.com", "hyatt.com", "marriott.com", "ihg.com",
-    "wyndham.com", "choicehotels.com",
-    # known dead/bounce sources from past cycles
-    "bjsrestaurants.com", "fogodechao.com", "claimjumper.com", "moxies.ca",
-    "fuegosla.com",
+    "wordpress.com", "shopify.com", "hilton.com", "hyatt.com",
+    "marriott.com", "ihg.com", "wyndham.com",
 }
+
 BLOCKED_LOCAL_PARTS = {
-    "email", "name", "you", "your", "username", "user",
-    "test", "demo", "sample", "admin", "webmaster",
-    "noreply", "no-reply", "donotreply", "postmaster",
-    "accessibility", "privacy", "legal", "press", "media",
-    "careers", "jobs", "hr", "investor", "investors",
-    "unsubscribe", "abuse",
+    "email", "name", "you", "your", "username", "user", "test", "demo",
+    "sample", "admin", "webmaster", "noreply", "no-reply", "donotreply",
+    "postmaster", "accessibility", "privacy", "legal", "press", "media",
+    "careers", "jobs", "hr", "investor", "investors", "unsubscribe", "abuse",
 }
+
 BLOCKED_EMAILS = {
     "email@address.com", "info@your-domain.com", "user@domain.com",
     "name@email.com", "you@example.com", "hello@calldone.org",
 }
+
 PLACEHOLDER_PATTERNS = [
-    r"your[-_]?domain",
-    r"your[-_]?company",
-    r"example\.",
-    r"^email@",
-    r"^name@",
-    r"^you@",
+    r"your[-_]?domain", r"your[-_]?company", r"example\.",
+    r"^email@", r"^name@", r"^you@",
     r"@.*\.(png|jpg|jpeg|gif|svg|webp)$",
 ]
+
 FREE_MAIL = {"gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "aol.com", "icloud.com"}
-PRIORITY_PREFIXES = ("info@", "contact@", "hello@", "service@", "office@", "manager@", "owner@", "dispatch@")
-# =========================
-# HELPERS
-# =========================
+PRIORITY_PREFIXES = ("info@", "contact@", "hello@", "service@", "office@", "manager@", "owner@")
+
 def get_domain(url):
     try:
         return urlparse(url).netloc.replace("www.", "").lower()
     except:
         return ""
+
 def is_valid_email(email):
     email = (email or "").lower().strip()
     if not email or "@" not in email:
@@ -70,6 +67,7 @@ def is_valid_email(email):
         if re.search(pattern, email):
             return False
     return True
+
 _mx_cache = {}
 def has_mx(domain):
     if not domain:
@@ -79,10 +77,11 @@ def has_mx(domain):
     try:
         answers = dns.resolver.resolve(domain, "MX", lifetime=4)
         result = len(answers) > 0
-    except Exception:
+    except:
         result = False
     _mx_cache[domain] = result
     return result
+
 def scrape_emails(url, business_domain=None):
     if not url:
         return ""
@@ -92,9 +91,7 @@ def scrape_emails(url, business_domain=None):
         for path in ["", "/contact", "/about", "/contact-us"]:
             try:
                 r = requests.get(urljoin(url, path), headers=headers, timeout=6)
-                emails = re.findall(
-                    r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', r.text
-                )
+                emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', r.text)
                 found += emails
             except:
                 continue
@@ -104,58 +101,75 @@ def scrape_emails(url, business_domain=None):
             if not is_valid_email(e):
                 continue
             domain = e.split("@")[-1]
-            # Must match the business's own domain OR be a free-mail address
             if business_domain:
                 if domain != business_domain and domain not in FREE_MAIL:
                     continue
             if not has_mx(domain):
                 continue
             valid.append(e)
-        # Prefer business-facing inboxes on the business's own domain
+
         def sort_key(x):
             x_domain = x.split("@")[-1]
             same_domain = 0 if (business_domain and x_domain == business_domain) else 1
             priority = 0 if x.startswith(PRIORITY_PREFIXES) else 1
             return (same_domain, priority)
+
         valid.sort(key=sort_key)
         return valid[0] if valid else ""
     except:
         return ""
-# =========================
-# MAIN
-# =========================
-rows = []
-with open("leads.csv", "r") as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        rows.append(row)
-fieldnames = ["Name", "Address", "Phone", "Website", "City", "Vertical", "Email", "Source"]
-# Write header once
-with open("leads_with_email.csv", "w", newline="") as f:
-    writer = csv.DictWriter(f, fieldnames=fieldnames)
-    writer.writeheader()
-kept = 0
-skipped = 0
-for i, row in enumerate(rows):
-    website = row.get("Website", "")
-    domain = get_domain(website)
-    email = scrape_emails(website, business_domain=domain)
-    if email and is_valid_email(email):
-        source = "scraped"
-        kept += 1
-    else:
-        email = ""
-        source = "none"
-        skipped += 1
-    row["Email"] = email
-    row["Source"] = source
-    # Ensure Vertical field exists even if leads.csv is from old scraper run
-    if "Vertical" not in row:
-        row["Vertical"] = ""
-    print(f"[{i+1}/{len(rows)}] {row['Name']} → {email or 'no email'} ({source})")
-    with open("leads_with_email.csv", "a", newline="") as fa:
-        writer2 = csv.DictWriter(fa, fieldnames=fieldnames, extrasaction="ignore")
-        writer2.writerow(row)
-    time.sleep(0.3)
-print(f"\nDone. Kept: {kept}  Skipped: {skipped}")
-print("Output: leads_with_email.csv")
+
+def load_finder_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE) as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_finder_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+def run():
+    if not os.path.exists(LEADS_FILE):
+        print("No leads.csv found. Run scraper first.")
+        return
+
+    rows = []
+    with open(LEADS_FILE) as f:
+        rows = list(csv.DictReader(f))
+
+    finder_state = load_finder_state()
+    fieldnames = ["Name", "Address", "Phone", "Website", "City", "Vertical", "Email", "Source"]
+
+    file_exists = os.path.exists(OUTPUT_FILE)
+    kept = 0
+    skipped = 0
+
+    with open(OUTPUT_FILE, "a", newline="") as fa:
+        writer = csv.DictWriter(fa, fieldnames=fieldnames, extrasaction="ignore")
+        if not file_exists:
+            writer.writeheader()
+
+        for i, row in enumerate(rows):
+            website = row.get("Website", "")
+            key = website.lower().strip()
+
+            if not website or finder_state.get(key):
+                skipped += 1
+                continue
+
+            domain = get_domain(website)
+            email_found = scrape_emails(website, business_domain=domain)
+
+            if email_found and is_valid_email(email_found):
+                row["Email"] = email_found
+                row["Source"] = "scraped"
+                kept += 1
+                writer.writerow(row)
+                print(f"[{i+1}/{len(rows)}] {row['Name']} → {email_found}")
+            else:
+                skipped += 1
+                print(f"[{i+1}/{len(rows)}] {row['Name']} → no email")
