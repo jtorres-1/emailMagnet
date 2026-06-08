@@ -45,7 +45,7 @@ STEP2 = """Hey {name},
 
 Just following up in case this got buried.
 
-MapZap pulls 100 local business leads as a CSV in 60 seconds — names, phones, addresses. $49 one time, no monthly fee.
+MapZap pulls 100 local business leads as a CSV in 60 seconds. Names, phones, addresses. $49 one time, no monthly fee.
 
 If you ever need a quick list for a client campaign or outreach push, mapzap.org
 
@@ -69,17 +69,28 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
-def send_email(to, subject, body):
+def get_smtp_connection(retries=3):
+    for attempt in range(retries):
+        try:
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            return server
+        except Exception as e:
+            print(f"SMTP connect attempt {attempt+1} failed: {e}")
+            time.sleep(10)
+    return None
+
+def send_email(server, to, subject, body):
     try:
         msg = MIMEMultipart()
         msg["From"] = EMAIL_ADDRESS
         msg["To"] = to
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
-            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-            server.send_message(msg)
+        server.send_message(msg)
         return True
+    except smtplib.SMTPServerDisconnected:
+        return None  # Signal to reconnect
     except Exception as e:
         print(f"Send error: {e}")
         return False
@@ -87,7 +98,7 @@ def send_email(to, subject, body):
 def get_ai_reply(thread_history, business_name, vertical=""):
     client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
     vertical_line = f"They are a {vertical}." if vertical else ""
-    prompt = f"""You are Jesse, a 21-year-old developer who built MapZap — a tool that pulls 100 local business leads as a CSV in 60 seconds. $49 one time at mapzap.org.
+    prompt = f"""You are Jesse, a 21-year-old developer who built MapZap, a tool that pulls 100 local business leads as a CSV in 60 seconds. $49 one time at mapzap.org.
 
 A business owner or marketer replied to your cold email. Your goal is to answer their question and move them toward buying at mapzap.org.
 
@@ -138,7 +149,11 @@ def check_replies(state):
                 thread = state[sender].get("thread", "") + f"\nThem: {body}"
                 vertical = state[sender].get("vertical", "")
                 ai_reply = get_ai_reply(thread, state[sender].get("name", ""), vertical)
-                send_email(sender, SUBJECT_FOLLOWUP, ai_reply)
+                # Use fresh connection for replies
+                reply_server = get_smtp_connection()
+                if reply_server:
+                    send_email(reply_server, sender, SUBJECT_FOLLOWUP, ai_reply)
+                    reply_server.quit()
                 state[sender]["thread"] = thread + f"\nYou: {ai_reply}"
                 state[sender]["step"] = "replied"
                 save_state(state)
@@ -161,6 +176,14 @@ def run():
                 leads.append(row)
 
     print(f"Loaded {len(leads)} leads with emails")
+
+    # Open one persistent SMTP connection for the whole batch
+    server = get_smtp_connection()
+    if not server:
+        print("Could not connect to SMTP. Will retry next cycle.")
+        return
+
+    sent_count = 0
 
     for lead in leads:
         email_addr = lead["Email"].lower()
@@ -185,39 +208,67 @@ def run():
 
         last_sent = datetime.fromisoformat(entry["last_sent"]) if entry["last_sent"] else None
         step = entry["step"]
+        body = None
+        subject = None
 
         if step == 0:
             body = STEP1.format(name=name, city=city, vertical=vertical or "business")
-            if send_email(email_addr, SUBJECT_STEP1, body):
-                entry["step"] = 1
-                entry["last_sent"] = now.isoformat()
-                entry["thread"] = f"You: {body}"
-                print(f"Step 1 sent → {email_addr}")
-                save_state(state)
-                time.sleep(45)
-
+            subject = SUBJECT_STEP1
         elif step == 1 and last_sent and now - last_sent > timedelta(days=2):
             body = STEP2.format(name=name, city=city)
-            if send_email(email_addr, SUBJECT_FOLLOWUP, body):
-                entry["step"] = 2
-                entry["last_sent"] = now.isoformat()
-                entry["thread"] += f"\nYou: {body}"
-                print(f"Step 2 sent → {email_addr}")
-                save_state(state)
-                time.sleep(45)
-
+            subject = SUBJECT_FOLLOWUP
         elif step == 2 and last_sent and now - last_sent > timedelta(days=2):
             body = STEP3.format(name=name, city=city)
-            if send_email(email_addr, SUBJECT_FOLLOWUP, body):
-                entry["step"] = 3
-                entry["last_sent"] = now.isoformat()
-                entry["thread"] += f"\nYou: {body}"
-                print(f"Step 3 sent → {email_addr}")
-                save_state(state)
-                time.sleep(45)
+            subject = SUBJECT_FOLLOWUP
+
+        if not body:
+            continue
+
+        result = send_email(server, email_addr, subject, body)
+
+        if result is None:
+            # Connection dropped — reconnect and retry
+            print("SMTP disconnected — reconnecting...")
+            try:
+                server.quit()
+            except:
+                pass
+            time.sleep(15)
+            server = get_smtp_connection()
+            if not server:
+                print("Could not reconnect. Stopping batch.")
+                break
+            result = send_email(server, email_addr, subject, body)
+
+        if result:
+            entry["step"] = step + 1
+            entry["last_sent"] = now.isoformat()
+            entry["thread"] = entry.get("thread", "") + f"\nYou: {body}"
+            print(f"Step {step+1} sent → {email_addr}")
+            save_state(state)
+            sent_count += 1
+            # Reconnect every 50 emails to keep connection fresh
+            if sent_count % 50 == 0:
+                try:
+                    server.quit()
+                except:
+                    pass
+                time.sleep(10)
+                server = get_smtp_connection()
+                if not server:
+                    print("Could not reconnect after batch. Stopping.")
+                    break
+            time.sleep(60)  # 60 second delay between emails
+        else:
+            print(f"Failed to send to {email_addr}")
+
+    try:
+        server.quit()
+    except:
+        pass
 
     check_replies(state)
-    print("Cycle complete.")
+    print(f"Cycle complete. Sent {sent_count} emails.")
 
 if __name__ == "__main__":
     while True:
